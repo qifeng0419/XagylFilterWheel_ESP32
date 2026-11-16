@@ -1,0 +1,13 @@
+# 编译与调试产物
+.build/
+.pio/
+.pioenvs
+.piolibdeps
+CMakeLists.txt
+.vscode/
+*.elf
+*.bin
+*.elf.bin
+flash_*
+# Arduino IDE 的编译缓存
+build/
