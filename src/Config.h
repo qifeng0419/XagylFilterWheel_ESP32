@@ -2,7 +2,7 @@
 //  Config.h —— 滤镜轮固件唯一需要用户修改的配置头
 //
 //  硬件：ESP32 + TMC2209（官方库 TMCStepper）+ MT6701 磁编码器
-//  协议：Xagyl Filter Wheel 串口协议（见 docs/PROTOCOL_NOTES.md）
+//  协议：Xagyl Filter Wheel 串口协议（见 docs/PROTOCOL.md）
 // ============================================================================
 #pragma once
 
@@ -18,14 +18,11 @@
 
 // 槽位间距，单位为「编码器角度」。
 // 0 = 自动取 360 / FW_FILTER_SLOTS（滤镜轮等分且编码器与轮同轴时正确）。
-// 若编码器通过齿轮比多转，或槽位非等分，请在此填实际角度，或运行自动校准（R6）。
+// 若编码器通过齿轮比多转，或槽位非等分，请在此填实际角度，
+// 或用服务台 space / 自动校准（R6）逐槽修正。
+// 本值只是出厂默认，运行期以 NVS 中的 slotSpacingDeg 为准。
 #ifndef FW_SLOT_SPACING_DEG
-#define FW_SLOT_SPACING_DEG 0.0f
-#endif
-
-// 编码器轴 : 滤镜轮轴 的传动比，仅用于文档与换算提示。1.0 = 直连。
-#ifndef FW_GEAR_RATIO
-#define FW_GEAR_RATIO 1.0f
+#define FW_SLOT_SPACING_DEG 0.0
 #endif
 
 // 到位判定容差，单位「度」。
@@ -36,8 +33,13 @@
 #define FW_POSITION_TOL_DEG 2.0f
 #endif
 
-// 空闲时对编码器角度做的静默复查阈值（度）。0 = 关闭。
-// 打开后，若轮子被外力推动偏 out of tol，固件会自行走回原位（不产生任何串口输出）。
+// 空闲时对编码器角度做的静默复查。开启后若轮子被外力推动超出容差，
+// 固件会自行走回原位（不产生任何串口输出）。
+// 注意：预处理器 #if 无法比较浮点常量，所以「开关」用整数宏、
+//       「阈值」用浮点宏，二者分开定义。
+#ifndef FW_IDLE_RECHECK_ON
+#define FW_IDLE_RECHECK_ON 0
+#endif
 #ifndef FW_IDLE_RECHECK_DEG
 #define FW_IDLE_RECHECK_DEG 0.0f
 #endif
@@ -74,15 +76,11 @@
 #ifndef FW_SPEED_MAX_HZ            // 巡航脉冲频率（步/秒）
 #define FW_SPEED_MAX_HZ 3000
 #endif
-#ifndef FW_SPEED_MIN_HZ            // 起跳频率，受 LEDC 下限约束，见 Motion.cpp 说明
+#ifndef FW_SPEED_MIN_HZ            // 起跳频率（梯形曲线最低速，见 Motion.cpp）
 #define FW_SPEED_MIN_HZ 100
 #endif
 #ifndef FW_ACCEL_HZ_PER_S          // 加速度（步/秒²）
 #define FW_ACCEL_HZ_PER_S 6000
-#endif
-// 连续转位（跨多槽）时是否先减速到该频率再反向，减少过冲。0 = 关闭
-#ifndef FW_CRUISE_APPROACH_HZ
-#define FW_CRUISE_APPROACH_HZ 900
 #endif
 
 // 一次移动允许的最大纠正重试次数（到位后编码器仍超差）
@@ -148,9 +146,11 @@
 #define FW_TMC_HOLD_RATIO 0.30f
 #endif
 
-// 静音模式：true = StealthChop（安静、力矩略小），false = SpreadCycle（有力、有啸叫）
+// 静音模式：1 = StealthChop（安静、力矩略小），0 = SpreadCycle（有力、有啸叫）
+// 必须用 1/0 而不是 true/false：预处理器不认识 true，会把它当未定义标识符求值为 0，
+// 导致 #if FW_TMC_STEALTHCHOP 永远为假、静音模式形同虚设。
 #ifndef FW_TMC_STEALTHCHOP
-#define FW_TMC_STEALTHCHOP true
+#define FW_TMC_STEALTHCHOP 1
 #endif
 
 // 空闲后自动降流/断流（TPOWERDOWN 秒数，0 = 保持运行电流）

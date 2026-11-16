@@ -2,10 +2,13 @@
 //  Settings.cpp —— NVS 持久化
 //
 //  落盘格式带 magic + version 头：固件升级导致结构体布局变化时，
-//  旧数据会被识别为不兼容并自动回落到默认值，而不是被按错误偏移量解析成乱码。
+//  旧数据会被识别为不兼容并自动回落到默认值，而不是按错误偏移量解析成乱码。
+//
+//  槽中心角与槽位反查直接调用 lib/xagyl_geom ——
+//  生产代码与 `pio test -e native` 跑的是同一份实现，不存在「测的是副本」。
 // ============================================================================
 #include "Settings.h"
-#include "Encoder.h"
+#include "xagyl_geom.h"
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -25,12 +28,17 @@ struct Blob {
 bool isPow2InRange(uint16_t v) {
   return v >= 1 && v <= 256 && (v & (v - 1)) == 0;
 }
+
+// 偏移允许的最大单位数：半个槽距。超过它相邻槽位会互相穿插。
+float offsetLimitUnits(float spacingDeg) {
+  return spacingDeg * 0.5f / (float)FW_OFFSET_UNIT_DEG;
+}
 }  // namespace
 
 void SettingsStore::setDefault() {
   memset(&_cur, 0, sizeof(_cur));
   _cur.homeAngleDeg    = 0.0f;          // 槽位 1 默认对齐编码器 0°
-  _cur.slotSpacingDeg  = 0.0f;          // 0 = 自动 360/N
+  _cur.slotSpacingDeg  = (float)FW_SLOT_SPACING_DEG;   // 0 = 自动 360/N
   _cur.bootMode        = BOOT_FROM_ENCODER;
   _cur.microsteps      = FW_MICROSTEPS;
   _cur.runMa           = FW_TMC_RUN_MA;
@@ -52,10 +60,10 @@ bool SettingsStore::sane() const {
   if (_cur.dirInvert > 1) return false;
   if (_cur.lastSlot > FW_FILTER_SLOTS) return false;
   if (FW_FILTER_SLOTS < 1 || FW_FILTER_SLOTS > SETTINGS_MAX_SLOTS) return false;
+
+  const float lim = offsetLimitUnits(spacingDeg());
   for (int i = 0; i < SETTINGS_MAX_SLOTS; ++i) {
-    // 偏移限幅：|cnt| * unit 不得超过半个槽距，否则相邻槽位会互相穿插
-    const float lim = spacingDeg() * 0.5f / FW_OFFSET_UNIT_DEG;
-    if ((float)abs(_cur.offsetCnt[i]) > lim) return false;
+    if ((float)abs((int)_cur.offsetCnt[i]) > lim) return false;
   }
   return true;
 }
@@ -90,44 +98,35 @@ void SettingsStore::load() {
 void SettingsStore::save() {
   if (!_dirty) return;
   Blob blob;
-  blob.magic = CFG_MAGIC;
+  blob.magic   = CFG_MAGIC;
   blob.version = CFG_VERSION;
-  blob.st = _cur;
+  blob.st      = _cur;
   _prefs.putBytes(FW_NVS_KEY, &blob, sizeof(blob));
   _dirty = false;
 }
 
 // ---------------------------------------------------------------------------
 // 槽位 n 的目标绝对角 = home + (n-1)*spacing + offset[n]，归一到 [0,360)
+// 越界的 slot 返回 home（调用方应自行校验，这里只是保证不返回垃圾值）
 // ---------------------------------------------------------------------------
 float SettingsStore::slotAngle(int slot) const {
   if (slot < 1 || slot > FW_FILTER_SLOTS) return _cur.homeAngleDeg;
-  float a = _cur.homeAngleDeg
-          + ((float)(slot - 1) * spacingDeg())
-          + offsetDeg(slot);
-  a = fmodf(a, 360.0f);
-  if (a < 0.0f) a += 360.0f;
-  return a;
+  return xagyl_geom::slotAngleDeg(slot, _cur.homeAngleDeg, spacingDeg(), offsetDeg(slot));
 }
 
 // ---------------------------------------------------------------------------
-// 由实测角反推最近槽位。半间距之外返回 0 —— 报告真实测到的位置，
-// 而不是「命令里期望的位置」。
+// 由实测角反推最近槽位。超出判定范围返回 0 —— 报告真实测到的位置，
+// 而不是「命令里期望的位置」。容差直接用到位容差，与运动层的判据保持一致。
 // ---------------------------------------------------------------------------
 int SettingsStore::slotForAngle(float deg) const {
-  const float sp = spacingDeg();
-  int best = 0;
-  float bestDist = 1e9f;
-  for (int i = 1; i <= FW_FILTER_SLOTS; ++i) {
-    const float d = fabsf(Encoder::signedDelta(deg, slotAngle(i)));
-    if (d < bestDist) { bestDist = d; best = i; }
-  }
-  return (bestDist <= sp * 0.5f) ? best : 0;
+  return xagyl_geom::nearestSlot(deg, FW_FILTER_SLOTS, _cur.homeAngleDeg, spacingDeg(),
+                                 _cur.offsetCnt, (float)FW_OFFSET_UNIT_DEG,
+                                 _cur.positionTolDeg);
 }
 
 int SettingsStore::setOffsetUnits(int slot, int units) {
   if (slot < 1 || slot > FW_FILTER_SLOTS) return 0;
-  const float lim = spacingDeg() * 0.5f / FW_OFFSET_UNIT_DEG;
+  const float lim = offsetLimitUnits(spacingDeg());
   int v = units;
   if ((float)v > lim)  v = (int)lim;
   if ((float)v < -lim) v = -(int)lim;
@@ -138,6 +137,5 @@ int SettingsStore::setOffsetUnits(int slot, int units) {
 
 int SettingsStore::addOffsetUnits(int slot, int delta) {
   if (slot < 1 || slot > FW_FILTER_SLOTS) return 0;
-  int v = (int)_cur.offsetCnt[slot - 1] + delta;
-  return setOffsetUnits(slot, v);
+  return setOffsetUnits(slot, (int)_cur.offsetCnt[slot - 1] + delta);
 }

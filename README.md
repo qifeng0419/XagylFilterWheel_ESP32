@@ -79,19 +79,110 @@ ESP32 适配要点（库在 ESP32 上的两个坑，本工程已处理）：
 
 ---
 
-## 4. 编译烧录
+## 4. 工程结构与编译
 
-### Arduino IDE
-1. 安装 ESP32 开发板支持包；`工具 → 开发板 → ESP32 Dev Module`
-2. 用文件夹名打开：`XagylFilterWheel_ESP32`（Arduino 要求 `.ino` 与目录同名）
-3. 装好 `TMCStepper`，改 `Config.h` 里与硬件相符的引脚与机械参数
-4. 烧录，打开串口监视器 115200（板载 USB-串口桥那一路）
+本工程是标准 **PlatformIO** 项目布局：
 
-### PlatformIO
 ```
-pio run -t upload
-pio device monitor
+XagylFilterWheel_ESP32/
+├── platformio.ini            环境与依赖（改硬件形态可在这里用 build_flags 覆盖）
+├── src/                      固件源码，入口是 main.cpp
+│   ├── main.cpp              上电策略 + 主循环调度
+│   ├── Config.h              全部可调参数（唯一需要改的文件）
+│   ├── Settings.h/.cpp       配置结构与 NVS 掉电保存（magic+version 头）
+│   ├── Encoder.h/.cpp        MT6701 抽象层（I²C / SSI 双后端）
+│   ├── StepperDriver.h/.cpp  TMC2209 封装（基于官方库 TMCStepper）
+│   ├── Motion.h/.cpp         梯形脉冲 + 验位闭环
+│   ├── Protocol.h/.cpp       Xagyl 协议设备端实现
+│   ├── Calibrate.h/.cpp      逐槽自动校准状态机
+│   └── Console.h/.cpp        调试命令行（独立串口，不参与协议）
+├── lib/
+│   └── xagyl_geom/           纯几何/编码计算库，不依赖 Arduino，可在 PC 上单测
+├── include/                  工程级公共头（当前为空，见目录内说明）
+├── test/
+│   └── test_xagyl_geom/      native 单元测试：跨 0° 展开、槽中心表、SSI 帧解析
+│       ├── test_xagyl_geom.cpp
+│       └── run_tests.ps1     直接编译运行测试的脚本（见下）
+└── docs/PROTOCOL.md          协议契约与实现细节
 ```
+
+### PlatformIO（推荐）
+
+```bash
+pio run                    # 编译固件
+pio run -t upload          # 编译并烧录
+pio device monitor         # 看服务台（115200）
+pio test -e native         # 在 PC 上跑纯逻辑单测，不需要硬件
+pio check -e esp32dev      # 静态检查
+```
+
+VS Code 用户直接「打开文件夹」即可，PlatformIO 插件会自动识别 `platformio.ini`。
+
+想用构建系统切换硬件形态而不改源码：
+
+```ini
+; platformio.ini 的 [env:esp32dev] 里追加
+build_flags = -D FW_ENCODER_BUS=2          ; 改用 SSI/SPI 读 MT6701
+build_flags = -D FW_ENABLE_TMC_UART=0      ; 纯 STEP/DIR，不接 TMC UART
+build_flags = -D FW_FILTER_SLOTS=7         ; 7 位滤镜轮
+build_flags = -D FW_MOTOR_STEPS_PER_REV=400 ; 0.9° 电机
+```
+
+### Arduino IDE（仍然支持）
+
+PlatformIO 的 `src/` 布局可直接被 Arduino IDE 打开，只是需要两步额外操作：
+
+1. **建软链接或复制**：把整个 `src/` 目录改名为一个与 `.ino` 同名的 sketch 文件夹。
+   由于本工程的入口是 `main.cpp` 而非 `.ino`，Arduino IDE 不能直接打开，
+   建议在 `src/` 里新建一个只含 `#include "main.cpp"` 之外调用的空 `.ino`，
+   或者继续使用 PlatformIO —— 后者能跑测试、能锁依赖版本，更省事。
+2. **装库**：库管理器安装 `TMCStepper`，并把 `lib/xagyl_geom` 加入库搜索路径
+   （IDE 1.8+ 可在 `文件 → 首选项 → 其他开发板管理器设置` 旁指定 `user_libraries_dir`，
+   或直接把 `xagyl_geom` 复制进 `~/Arduino/libraries/`）。
+
+> 说明：从 `.ino` 改成 `main.cpp` 有两个必须处理的差别 ——
+> 不再自动 `#include <Arduino.h>`（已显式包含），
+> 不再有自动函数原型生成（`static` 辅助函数定义在 `setup()` 之前即可）。
+
+---
+
+## 4b. 单元测试
+
+覆盖 17 个用例，重点是**最容易出错且不接硬件就看不出来的部分**。
+
+**推荐运行方式**（本机构建验证用的就是这个，17/17 全绿）：
+
+```bash
+powershell -ExecutionPolicy Bypass -File test\test_xagyl_geom\run_tests.ps1
+```
+
+脚本用 PlatformIO 自带的 MinGW 工具链直接编译「测试 + 库 + Unity」并运行，
+不依赖 native 环境对本地 `lib/` 的自动发现。
+
+```bash
+pio test -e native        # 标准写法，见下方说明
+```
+
+> ⚠ 关于 `pio test -e native`：在 **PlatformIO 6.2.0 + native 环境**下实测不稳定——
+> `test_build_src=no` 时 LDF 不会把 `lib/xagyl_geom` 的头路径和源码纳入 test 编译单元，
+> 补 `-I` 则 LDF 判定"无库依赖"、库源码不参与链接（undefined reference），
+> 不补则头文件找不到。这是构建工具在当前版本的行为，与被测代码无关。
+> `platformio.ini` 的 `[env:native]` 保留为标准配置，待该行为修复后可直接用；
+> 现阶段以 `run_tests.ps1` 为准。
+
+| 用例组 | 验的是什么 | 出错的真机表现 |
+|---|---|---|
+| `unwrap` / `signedDelta` | 跨 0° 的角度展开与符号 | 359.5°→0.5° 被当成倒转 359°，轮子绕远路 |
+| `slot_table_*` | `home + (n-1)×spacing + offset` 角表，含 5 位/7 位/非整数间距 | 某一位始终对不齐 |
+| `nearest_slot` | 由实测角反推槽位、超差返回 0、偏移改变后不再误认领 | `I2` 报错一位 |
+| `ssi_crc_*` / `ssi_unpack_*` | CRC 自洽性与两种位序的镜像关系 | SSI 后端读数跳变 |
+
+断言原则：只写「由算法性质保证成立」的，不写「碰巧观察到」的。
+例如 CRC 用线性 + 初值 0 的性质证明「任意单比特错误必被检出」，
+而不是断言两个随机帧的 CRC 不同。
+
+⚠ 这些测试证明的是**实现自洽**，不能证明该 CRC 多项式与位序就是 MT6701 的口径 ——
+那仍需上机确认，见第 8 节限制 1。
 
 ---
 

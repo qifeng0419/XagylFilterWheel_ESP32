@@ -1,11 +1,16 @@
 // ============================================================================
-//  XagylFilterWheel_ESP32.ino —— 主程序
+//  main.cpp —— 固件入口（PlatformIO src/ 结构）
 //
 //  硬件      ：ESP32 + TMC2209（官方库 TMCStepper）+ MT6701 14 位磁编码器
 //  协议      ：Xagyl Filter Wheel 串口协议（rpineau/XagylFilterWheel 的驱动契约）
 //  核心特性  ：初始位置可调（home 角 / 槽间距 / 逐槽偏移 / 上电策略，全部掉电保存）
 //
-//  所有可调参数集中在 Config.h；上电后服务台（UART0）可现场修改并落盘。
+//  所有可调参数集中在 src/Config.h；上电后服务台（UART0）可现场修改并落盘。
+//
+//  Arduino 迁移说明：
+//    从 .ino 改为 .cpp 后，两个关键差别必须处理 ——
+//    1) 不再自动 #include <Arduino.h>，本文件显式包含；
+//    2) 不再有自动函数原型，static 辅助函数定义在 setup() 之前即可（本文件已如此）。
 //
 //  接线速查（默认引脚，改配置请看 README）：
 //    TMC2209 STEP -> GPIO26      TMC2209 DIR  -> GPIO27
@@ -15,6 +20,8 @@
 //    服务台 UART0 RX/TX -> GPIO3/GPIO1     （115200，接板载 USB-串口桥）
 // ============================================================================
 #include <Arduino.h>
+#include <math.h>
+
 #include "Config.h"
 #include "Settings.h"
 #include "Encoder.h"
@@ -23,7 +30,6 @@
 #include "Protocol.h"
 #include "Console.h"
 #include "Calibrate.h"
-#include <math.h>
 
 namespace {
 
@@ -39,7 +45,7 @@ int nearestSlot(float deg) {
 }
 
 void runBootPolicy() {
-  // 绝对值编码器的优势：位置本身不需要靠归零找回，只需要「吸附到最近的槽中心」。
+  // 绝对值编码器的优势：位置不需要靠归零找回，只需要「吸附到最近的槽中心」。
   if (!g_encoder.healthy()) {
     // 编码器还没读通：先重试若干次，仍失败就直接走槽 1（最保守的安全位置）
     for (int i = 0; i < 5 && !g_encoder.healthy(); ++i) g_encoder.update();
@@ -113,8 +119,10 @@ void setup() {
 
 void loop() {
   static bool wasMoving = false;
-  static uint32_t lastIdleCheckMs = 0;
   static uint32_t lastEncPollMs = 0;
+#if FW_IDLE_RECHECK_ON
+  static uint32_t lastIdleCheckMs = 0;
+#endif
 
   // 1) 运动层：发脉冲 / 沉降 / 验位（内部自带单次时长上限）
   g_motion.tick();
@@ -122,7 +130,7 @@ void loop() {
   // 2) 协议层：收命令、回应答、推进校准
   g_protocol.tick();
 
-  // 3) 服务台：只在 USB 上有输入时才消耗时间
+  // 3) 服务台：只在有输入时才消耗时间
   g_console.tick();
 
   // 4) 走位结束结算：记录掉电记忆槽位
@@ -140,7 +148,7 @@ void loop() {
 
   // 6) 静默复查（可选，默认关闭）：轮子被外力推动后自行走回原位。
   //    注意这会产生「上位机没发命令却自己在动」的行为，只在明确需要时才开。
-#if FW_IDLE_RECHECK_DEG > 0
+#if FW_IDLE_RECHECK_ON
   if (!moving && !g_protocol.calibrating() && g_encoder.healthy() &&
       (now - lastIdleCheckMs) >= (unsigned long)FW_IDLE_RECHECK_MS) {
     lastIdleCheckMs = now;
